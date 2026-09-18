@@ -1,0 +1,17 @@
+[Unit]
+Description=Prominence FastAPI backend
+After=network.target mongod.service
+Wants=mongod.service
+
+[Service]
+Type=simple
+User=prominence
+Group=prominence
+WorkingDirectory=/opt/prominence/backend
+EnvironmentFile=/opt/prominence/backend/.env
+ExecStart=/opt/prominence/backend/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8001 --workers 2
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

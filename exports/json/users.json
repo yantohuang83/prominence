@@ -1,0 +1,1 @@
+[{"_id":{"$oid":"6a3bc243fc2f5fa028e2f910"},"id":"800bff82-3204-47ae-a55c-554cc41ec7c1","email":"admin@prominence.id","password_hash":"$2b$12$wqdHyxGML8svJ3GPHQKr2uGJRlPv3tZNcAqoxQJDLtTSWZCBv4SJ2","name":"Admin","role":"admin","created_at":"2026-06-24T11:40:51.735026+00:00"}]
