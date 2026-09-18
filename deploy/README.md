@@ -1,11 +1,9 @@
-# Prominence Production Deploy
+# Production deployment
 
-Use the production backend dependencies:
+Ikuti [DEPLOYMENT.md](../DEPLOYMENT.md) untuk MySQL, migrasi dan konfigurasi.
+Instal `backend/requirements-production.txt`, isi `DATABASE_URL`, lalu jalankan
+`python migrate.py` sebelum menyalakan service. Service bergantung pada `mysql.service`.
 
-```bash
-cd /opt/prominence/backend
-source .venv/bin/activate
-pip install -r requirements-production.txt
-```
-
-If Nginx returns its own `404 Not Found` for `/` or `/api/health`, the Prominence site is not the active/default server block. Install `nginx-prominence-http.conf` as `/etc/nginx/sites-available/prominence`, enable it, and disable the default site.
+Jika Nginx mengembalikan 404 untuk `/` atau `/api/health`, periksa server block
+aktif. Template HTTP ada di `nginx-prominence-http.conf`; tambahkan TLS untuk
+cookie autentikasi Secure di production.

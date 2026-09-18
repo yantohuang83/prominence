@@ -72,9 +72,10 @@ async def get_current_admin(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type")
-    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+    user = await db.users.get(id=payload["sub"])
     if not user or user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
+    user.pop("password_hash", None)
     return user
 
 
@@ -84,7 +85,7 @@ LOCKOUT_MIN = 15
 
 
 async def check_lockout(db, identifier: str):
-    rec = await db.login_attempts.find_one({"identifier": identifier})
+    rec = await db.login_attempts.get(identifier=identifier)
     if not rec:
         return
     if rec.get("locked_until"):
@@ -99,14 +100,8 @@ async def check_lockout(db, identifier: str):
 
 
 async def record_failed(db, identifier: str):
-    rec = await db.login_attempts.find_one({"identifier": identifier})
-    count = (rec or {}).get("count", 0) + 1
-    update = {"count": count, "identifier": identifier}
-    if count >= MAX_FAILED:
-        update["locked_until"] = (datetime.now(timezone.utc) + timedelta(minutes=LOCKOUT_MIN)).isoformat()
-        update["count"] = 0
-    await db.login_attempts.update_one({"identifier": identifier}, {"$set": update}, upsert=True)
+    await db.record_failed(identifier, MAX_FAILED, LOCKOUT_MIN)
 
 
 async def clear_failed(db, identifier: str):
-    await db.login_attempts.delete_one({"identifier": identifier})
+    await db.login_attempts.delete(identifier=identifier)
