@@ -1,190 +1,118 @@
-# Production Deployment Guide — Prominence
+# Deployment Prominence — MySQL
 
-Panduan deploy ke VPS/cloud server sendiri (tanpa GitHub, tanpa platform Emergent). Cocok untuk: Ubuntu/Debian VPS di DigitalOcean, Linode, AWS EC2, Hetzner, Niagahoster Cloud, dll.
+Backend tetap FastAPI; seluruh data aplikasi disimpan di MySQL 8.0+ menggunakan
+SQLAlchemy async + aiomysql. Frontend React dan endpoint `/api` tetap kompatibel.
+Gunakan Python 3.11+ dan MySQL dengan InnoDB/utf8mb4.
 
-**Arsitektur target**
-```
-                        ┌───────────────────────────┐
-   (HTTPS, port 443) ──▶│  Nginx (reverse proxy)    │
-                        │  - serve React static     │
-                        │  - proxy /api → backend   │
-                        └────────┬──────────────────┘
-                                 │
-                       ┌─────────┴─────────┐
-                       ▼                   ▼
-              ┌──────────────┐     ┌──────────────┐
-              │ FastAPI 8001 │     │   MongoDB    │
-              │  (systemd)   │     │  (27017)     │
-              └──────────────┘     └──────────────┘
-```
+## 1. Siapkan MySQL
 
----
-
-## 0 · Prasyarat
-
-- 1 VPS Ubuntu 22.04 LTS (≥ 2 GB RAM, ≥ 20 GB disk)
-- Domain (mis. `prominence.id`) dengan akses ke DNS-nya
-- Akses SSH root atau user dengan sudo
-
-Persiapan domain (sebelum lanjut):
-- `A` record  `prominence.id`     → IP VPS
-- `A` record  `www.prominence.id` → IP VPS
-
----
-
-## 1 · Install dependencies di VPS
+Contoh Ubuntu 22.04/24.04 (jalankan sebagai administrator):
 
 ```bash
-ssh root@<IP_VPS>
-
-apt update && apt upgrade -y
-apt install -y curl git build-essential nginx ufw certbot python3-certbot-nginx \
-               python3.11 python3.11-venv python3-pip
-
-# Node.js 20 (untuk build frontend)
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt install -y nodejs
-npm install -g yarn
-
-# MongoDB 7 (opsi A — self-hosted)
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-apt update && apt install -y mongodb-org
-systemctl enable --now mongod
-
-# Firewall
-ufw allow OpenSSH
-ufw allow 'Nginx Full'
-ufw --force enable
+sudo apt update
+sudo apt install mysql-server python3-venv python3-pip nginx
+sudo systemctl enable --now mysql
+sudo mysql
 ```
 
-> **Opsi B — MongoDB Atlas (managed)**: lewati instalasi MongoDB lokal. Buat cluster M0 gratis di [cloud.mongodb.com](https://cloud.mongodb.com), tambah IP VPS ke whitelist, dan simpan connection string — nanti dipakai sebagai `MONGO_URL` di langkah 4.
+Jalankan SQL berikut, ganti password contoh:
 
----
-
-## 2 · Buat user aplikasi & upload source
-
-Di lokal (komputer Anda):
-```bash
-cd /app
-tar --exclude='node_modules' --exclude='__pycache__' --exclude='.git' \
-    -czf prominence.tar.gz backend frontend exports
-scp prominence.tar.gz root@<IP_VPS>:/tmp/
+```sql
+CREATE DATABASE prominence CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+CREATE USER 'prominence'@'127.0.0.1' IDENTIFIED BY 'GANTI_PASSWORD_KUAT';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, INDEX, ALTER
+  ON prominence.* TO 'prominence'@'127.0.0.1';
 ```
 
-Di VPS:
-```bash
-adduser --disabled-password --gecos "" prominence
-mkdir -p /opt/prominence
-tar -xzf /tmp/prominence.tar.gz -C /opt/prominence
-chown -R prominence:prominence /opt/prominence
-```
+Bind database ke localhost; tidak perlu membuka port 3306 ke internet.
+Hak CREATE/INDEX/ALTER diperlukan saat migrasi. Untuk operasional, Anda dapat
+memisahkan akun migrasi dari akun aplikasi yang hanya membutuhkan DML.
 
----
+## 2. Instal backend
 
-## 3 · MongoDB — security & user aplikasi
-
-Hanya jika **self-hosted** (opsi A). Skip kalau pakai Atlas.
+Letakkan repository di `/opt/prominence` milik user layanan `prominence`.
+Buat user tersebut bila belum ada: `sudo adduser --disabled-password --gecos "" prominence`.
 
 ```bash
-mongosh <<'EOF'
-use admin
-db.createUser({
-  user: "root",
-  pwd:  "GANTI_PASSWORD_ROOT_KUAT",
-  roles: [{ role: "root", db: "admin" }]
-})
-use prominence
-db.createUser({
-  user: "prominence",
-  pwd:  "GANTI_PASSWORD_APP_KUAT",
-  roles: [{ role: "readWrite", db: "prominence" }]
-})
-EOF
-
-# Aktifkan auth
-sed -i 's/#security:/security:\n  authorization: enabled/' /etc/mongod.conf
-systemctl restart mongod
-```
-
-Connection string yang akan dipakai:
-```
-mongodb://prominence:GANTI_PASSWORD_APP_KUAT@127.0.0.1:27017/prominence?authSource=prominence
-```
-
----
-
-## 4 · Backend — virtualenv + .env + systemd
-
-```bash
-sudo -u prominence -i
 cd /opt/prominence/backend
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements-production.txt
-deactivate
-exit
+cp .env.example .env
+python -c 'import secrets; print(secrets.token_hex(48))'
 ```
 
-Buat `.env` production (jangan reuse nilai preview):
+Edit `.env`:
+
+```dotenv
+DATABASE_URL=mysql+aiomysql://prominence:GANTI_PASSWORD_KUAT@127.0.0.1:3306/prominence?charset=utf8mb4
+JWT_SECRET=HASIL_GENERATOR_SECRET
+ADMIN_EMAIL=admin@prominence.id
+ADMIN_PASSWORD=PASSWORD_ADMIN_BARU
+CORS_ORIGINS=https://prominence.id,https://www.prominence.id
+```
+
+Percent-encode karakter khusus password dalam DATABASE_URL (`@` menjadi `%40`,
+`#` menjadi `%23`, dan seterusnya). `MONGO_URL` dan `DB_NAME` tidak digunakan lagi.
+Lindungi `.env` dengan `chmod 600 .env`; jangan commit file ini.
 
 ```bash
-nano /opt/prominence/backend/.env
+python migrate.py
+uvicorn server:app --host 127.0.0.1 --port 8001
 ```
 
-Isi:
-```
-MONGO_URL="mongodb://prominence:GANTI_PASSWORD_APP_KUAT@127.0.0.1:27017/prominence?authSource=prominence"
-DB_NAME="prominence"
-CORS_ORIGINS="https://prominence.id,https://www.prominence.id"
-JWT_SECRET="<HASIL python3 -c 'import secrets;print(secrets.token_hex(48))'>"
-ADMIN_EMAIL="admin@prominence.id"
-ADMIN_PASSWORD="<PASSWORD_ADMIN_BARU_YANG_KUAT>"
-```
+Migrasi membuat tujuh tabel aplikasi dan `schema_migrations`. Jalankan sebelum
+API dimulai, satu kali per deployment. Versi awal idempotent dan dapat dilanjutkan
+jika terputus. Migrasi berikutnya harus ditambahkan sebagai langkah versi baru di
+`migrate.py`; `create_all` bukan mekanisme alter tabel yang sudah ada.
+Startup API tidak menjalankan DDL.
 
-Permission ketat (file ini punya secret):
+Admin baru memerlukan ADMIN_PASSWORD. Untuk admin yang sudah ada, variabel ini
+mengganti password saat startup bila nilainya berbeda. Hapus variabel tersebut
+sesudah rotasi jika ingin mempertahankan hash yang sudah tersimpan.
+Cookie autentikasi tetap Secure: gunakan HTTPS di production; pada HTTP lokal,
+frontend dapat memakai header `X-Access-Token` sebagai Bearer token seperti sebelumnya.
+
+## 3. Pindahkan data MongoDB (opsional)
+
+Hentikan penulisan ke backend lama selama ekspor/cutover. Simpan backup MongoDB.
+Ekspor tiap koleksi sebagai JSON array menggunakan `mongoexport --jsonArray`:
+`users`, `insights`, `faqs`, `contact_inquiries`, `newsletter_subs`, `status_checks`.
+Gunakan snapshot terkini untuk production; `exports/json` di repository adalah
+snapshot preview lama yang mengandung data uji.
+
 ```bash
-chmod 600 /opt/prominence/backend/.env
-chown prominence:prominence /opt/prominence/backend/.env
+cd /opt/prominence/backend
+python import_mongo_json.py ../exports/json --dry-run
+python import_mongo_json.py ../exports/json
+# Hanya jika ingin memindahkan akun beserta hash bcrypt:
+python import_mongo_json.py ../exports/json --include-users
 ```
 
-Service systemd:
+Impor mempertahankan ID, slug, waktu UTC, konten bilingual dan hash password.
+`_id` Mongo diabaikan. Baris dengan ID yang sama dilewati tanpa ditimpa.
+Bentrok email/slug dengan ID berbeda menggagalkan seluruh transaksi impor.
+Tidak ada penghapusan tabel atau data. Semua file terpilih divalidasi sebelum
+penulisan; `--dry-run` hanya memvalidasi file dan tidak mendeteksi konflik di DB.
+`login_attempts` tidak dipindahkan: lockout sementara dimulai ulang.
+Impor pengguna sebelum startup pertama jika ingin mempertahankan ID admin lama.
+Ganti JWT_SECRET dan password admin setelah memindahkan akun preview.
+
+Verifikasi jumlah dan isi data sebelum mengalihkan trafik. Jika rollback diperlukan,
+gunakan deployment lama dengan backup MongoDB; penulisan baru ke MySQL tidak
+otomatis disalin kembali ke MongoDB.
+
+## 4. systemd
 
 ```bash
-cat > /etc/systemd/system/prominence-backend.service <<'EOF'
-[Unit]
-Description=Prominence FastAPI backend
-After=network.target mongod.service
-Wants=mongod.service
-
-[Service]
-Type=simple
-User=prominence
-Group=prominence
-WorkingDirectory=/opt/prominence/backend
-EnvironmentFile=/opt/prominence/backend/.env
-ExecStart=/opt/prominence/backend/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8001 --workers 2
-Restart=always
-RestartSec=3
-KillSignal=SIGINT
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable --now prominence-backend
-systemctl status prominence-backend --no-pager
-```
-
-Smoke test:
-```bash
+sudo cp deploy/prominence-backend.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now prominence-backend
 curl http://127.0.0.1:8001/api/health
-# {"status":"healthy","timestamp":"..."}
 ```
 
----
+Jalankan perintah copy dari root repository. Health endpoint memeriksa koneksi
+MySQL dan mengembalikan HTTP 503 bila database tidak tersedia.
 
 ## 5 · Frontend — build production static
 
@@ -209,211 +137,43 @@ Output build ada di `/opt/prominence/frontend/build/`.
 
 ---
 
-## 6 · Nginx — reverse proxy + static
+## 6. Nginx dan HTTPS
+
+Dari root repository, pasang konfigurasi HTTP terlebih dahulu agar penerbitan
+sertifikat tidak terhambat konfigurasi SSL yang belum memiliki sertifikat:
 
 ```bash
-cat > /etc/nginx/sites-available/prominence <<'EOF'
-server {
-    listen 80;
-    server_name prominence.id www.prominence.id;
-    # Sertifikat & redirect ditangani oleh certbot di langkah berikut
-    location /.well-known/acme-challenge/ { root /var/www/html; }
-    location / { return 301 https://$host$request_uri; }
-}
-
-server {
-    listen 443 ssl http2;
-    server_name prominence.id www.prominence.id;
-
-    # SSL akan ditambahkan certbot otomatis
-    # ssl_certificate     /etc/letsencrypt/live/prominence.id/fullchain.pem;
-    # ssl_certificate_key /etc/letsencrypt/live/prominence.id/privkey.pem;
-
-    # Frontend (static SPA)
-    root /opt/prominence/frontend/build;
-    index index.html;
-
-    # Long-cache static assets
-    location ~* \.(js|css|woff2?|ttf|otf|eot|svg|png|jpe?g|webp|gif|ico)$ {
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-        try_files $uri =404;
-    }
-
-    # SPA fallback — semua route non-asset dikirim ke index.html
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Backend API — proxy ke FastAPI lokal
-    location /api/ {
-        proxy_pass http://127.0.0.1:8001/api/;
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 60s;
-
-        # Buka header X-Access-Token agar SPA bisa membacanya
-        proxy_pass_header X-Access-Token;
-    }
-
-    # Security headers
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    client_max_body_size 10m;
-}
-EOF
-
-ln -sf /etc/nginx/sites-available/prominence /etc/nginx/sites-enabled/
-rm -f /etc/nginx/sites-enabled/default
-nginx -t && systemctl reload nginx
+sudo cp deploy/nginx-prominence-http.conf /etc/nginx/sites-available/prominence
+sudo ln -sf /etc/nginx/sites-available/prominence /etc/nginx/sites-enabled/prominence
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t
+sudo systemctl reload nginx
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d prominence.id -d www.prominence.id --redirect
 ```
 
----
+Sesuaikan `server_name` dengan domain Anda. Untuk VPS dengan banyak site,
+sesuaikan `default_server` dan jangan menonaktifkan konfigurasi site lain.
+Arahkan DNS domain ke VPS dan buka port 80/443 sebelum menjalankan Certbot.
+Certbot memasang sertifikat dan redirect HTTPS setelah verifikasi berhasil.
 
-## 7 · HTTPS — Let's Encrypt
+## Backup dan pengujian
 
 ```bash
-certbot --nginx -d prominence.id -d www.prominence.id \
-        --redirect --agree-tos -m admin@prominence.id --no-eff-email
-
-# auto-renew sudah aktif lewat certbot.timer; verifikasi:
-systemctl list-timers | grep certbot
+mysqldump --single-transaction --no-tablespaces -h 127.0.0.1 -u prominence -p prominence > prominence.sql
 ```
 
-Setelah sertifikat terbit, Nginx otomatis di-reload. Buka `https://prominence.id` — site harus tampil.
-
----
-
-## 8 · Import data preview (opsional)
-
-Upload bundle dari preview:
-```bash
-scp /app/exports/prominence-data-*.tar.gz root@<IP_VPS>:/tmp/
-ssh root@<IP_VPS>
-mkdir -p /opt/prominence/exports
-tar -xzf /tmp/prominence-data-*.tar.gz -C /opt/prominence/exports
-cd /opt/prominence/exports
-chmod +x import.sh
-
-# Import — ganti URL & nama DB sesuai .env Anda
-./import.sh "mongodb://prominence:GANTI_PASSWORD_APP_KUAT@127.0.0.1:27017/?authSource=prominence" "prominence"
-
-# Restart backend supaya admin di-seed ulang dengan password dari .env
-systemctl restart prominence-backend
-```
-
-Setelah import:
-- Login admin di `https://prominence.id/admin/login` dengan `ADMIN_EMAIL`/`ADMIN_PASSWORD` di `.env`
-- Hapus inquiry/subscriber test:
-  ```bash
-  mongosh "mongodb://prominence:...@127.0.0.1:27017/prominence?authSource=prominence" --eval '
-    db.contact_inquiries.deleteMany({email: /test|example/});
-    db.newsletter_subs.deleteMany({email: /test|example/});
-  '
-  ```
-
----
-
-## 9 · Operations — cheat-sheet
+Gunakan database pengujian terpisah (jangan database production):
 
 ```bash
-# Backend
-systemctl status prominence-backend
-systemctl restart prominence-backend
-journalctl -u prominence-backend -f          # follow logs
-journalctl -u prominence-backend -n 200      # last 200 lines
-
-# Nginx
-nginx -t                                     # syntax check
-systemctl reload nginx                       # apply config
-
-# MongoDB
-systemctl status mongod
-mongosh "mongodb://prominence:...@127.0.0.1:27017/prominence?authSource=prominence"
+cd backend
+pip install -r requirements-test.txt
+export TEST_DATABASE_URL='mysql+aiomysql://USER:PASSWORD@127.0.0.1:3306/prominence_test'
+python -m pytest tests/test_mysql.py -q
 ```
 
-### Backup otomatis MongoDB (harian)
-
-```bash
-mkdir -p /var/backups/prominence
-cat > /etc/cron.daily/prominence-mongo-backup <<'EOF'
-#!/usr/bin/env bash
-set -e
-TS=$(date +%Y%m%d-%H%M%S)
-OUT=/var/backups/prominence/$TS
-mkdir -p "$OUT"
-mongodump --uri="mongodb://prominence:GANTI_PASSWORD@127.0.0.1:27017/prominence?authSource=prominence" --out="$OUT"
-# rotate: keep last 14 days
-find /var/backups/prominence -maxdepth 1 -type d -mtime +14 -exec rm -rf {} \;
-EOF
-chmod +x /etc/cron.daily/prominence-mongo-backup
-```
-
----
-
-## 10 · Update / re-deploy (workflow tanpa Git)
-
-Setiap kali Anda mengubah kode di lokal:
-
-**Lokal:**
-```bash
-cd /app
-tar --exclude='node_modules' --exclude='__pycache__' --exclude='build' --exclude='.git' \
-    -czf /tmp/prominence-update.tar.gz backend frontend
-scp /tmp/prominence-update.tar.gz root@<IP_VPS>:/tmp/
-```
-
-**VPS:**
-```bash
-# Hot-swap source
-cd /opt/prominence
-tar -xzf /tmp/prominence-update.tar.gz
-
-# Update backend deps (kalau requirements-production.txt berubah)
-sudo -u prominence /opt/prominence/backend/.venv/bin/pip install \
-     -r /opt/prominence/backend/requirements-production.txt
-
-# Rebuild frontend
-sudo -u prominence -i bash -c "cd /opt/prominence/frontend && yarn install --frozen-lockfile && yarn build"
-
-# Restart backend, reload Nginx
-systemctl restart prominence-backend
-systemctl reload nginx
-```
-
----
-
-## 11 · Hardening tambahan (rekomendasi)
-
-- Aktifkan **fail2ban** untuk SSH dan Nginx:
-  ```bash
-  apt install -y fail2ban
-  systemctl enable --now fail2ban
-  ```
-- Nonaktifkan login root SSH dan pakai SSH key.
-- Aktifkan **logrotate** untuk log Nginx (default sudah ada).
-- Tambahkan **monitoring**: Uptime Kuma / Healthchecks.io memanggil `https://prominence.id/api/health` tiap 1 menit.
-- Set **CORS_ORIGINS** ketat (hanya domain Anda) — jangan biarkan `*` di produksi.
-- Set **CSP** header di Nginx kalau perlu.
-
----
-
-## 12 · Post-deploy checklist
-
-- [ ] `https://prominence.id` tampil dengan benar
-- [ ] Sertifikat SSL valid (lihat ikon gembok di browser)
-- [ ] `https://prominence.id/api/health` → `{"status":"healthy",...}`
-- [ ] Login admin di `/admin/login` bekerja
-- [ ] Submit form Contact dari halaman publik → masuk ke `/admin/inquiries`
-- [ ] Toggle bahasa EN/ID di header bekerja
-- [ ] Publish 1 insight dari CMS → muncul di `/resources`
-- [ ] Backup cron job aktif (`ls /var/backups/prominence/`)
-- [ ] Logs bersih: `journalctl -u prominence-backend -n 50`
-
-Selesai. Site siap di produksi.
+Suite ini menggunakan MySQL asli, membuat skema, dan menulis data uji.
+Jalankan pada database kosong untuk hasil terisolasi; data uji tidak semuanya dihapus.
+Tanpa TEST_DATABASE_URL, suite akan di-skip. Test HTTP lama `backend_test.py`
+memerlukan server aktif dan konfigurasi `REACT_APP_BACKEND_URL`, `ADMIN_EMAIL`,
+`ADMIN_PASSWORD` pada environment.

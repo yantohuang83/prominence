@@ -1,7 +1,7 @@
 [Unit]
 Description=Prominence FastAPI backend
-After=network.target mongod.service
-Wants=mongod.service
+After=network.target mysql.service
+Wants=mysql.service
 
 [Service]
 Type=simple

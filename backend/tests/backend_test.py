@@ -8,12 +8,14 @@ import uuid
 import requests
 import pytest
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL") or open("/app/frontend/.env").read().split("REACT_APP_BACKEND_URL=")[1].split("\n")[0].strip()
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL")
+if not BASE_URL:
+    pytest.skip("Set REACT_APP_BACKEND_URL for live HTTP tests", allow_module_level=True)
 BASE_URL = BASE_URL.rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@prominence.id"
-ADMIN_PASSWORD = "Prom1nence!CMS#2025"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@prominence.id")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 
 @pytest.fixture(scope="session")
